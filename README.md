@@ -1,1 +1,1 @@
-# Security-Camera-Team-3
+# Security Camera Team 3
