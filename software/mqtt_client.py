@@ -7,13 +7,18 @@ import json
 from datetime import datetime
 import threading
 import time
+import os
+from dotenv import load_dotenv
 
-# MQTT Configuration
-MQTT_BROKER = "mqtt.a5-p.cn"
-MQTT_PORT = 1883
-MQTT_USERNAME = "forge"
-MQTT_PASSWORD = "zDHRPjrH1G5iETx"
-MQTT_TOPIC = "security_camera/detections"
+# Load environment variables from config.env file
+load_dotenv('config.env')
+
+# MQTT Configuration from environment variables
+MQTT_BROKER = os.getenv('MQTT_BROKER')
+MQTT_PORT = int(os.getenv('MQTT_PORT'))
+MQTT_USERNAME = os.getenv('MQTT_USERNAME')
+MQTT_PASSWORD = os.getenv('MQTT_PASSWORD')
+MQTT_TOPIC = os.getenv('MQTT_TOPIC')
 
 class MQTTClient:
     """MQTT Client for sending detection messages"""
