@@ -8,10 +8,12 @@ from datetime import datetime
 import threading
 import time
 import os
+from pathlib import Path
 from dotenv import load_dotenv
 
-# Load environment variables from config.env file
-load_dotenv('config.env')
+# Load environment variables from config.env file in the same directory as this script
+config_path = Path(__file__).parent / 'config.env'
+load_dotenv(config_path)
 
 # MQTT Configuration from environment variables
 MQTT_BROKER = os.getenv('MQTT_BROKER')

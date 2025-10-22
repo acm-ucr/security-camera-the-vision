@@ -2,6 +2,13 @@ import cv2
 import argparse
 from ultralytics import YOLO
 from mqtt_client import initialize_mqtt, send_detection_message, is_mqtt_connected
+import os
+from pathlib import Path
+from dotenv import load_dotenv
+
+# Load environment variables from config.env file
+config_path = Path(__file__).parent / 'config.env'
+load_dotenv(config_path)
 
 conversion = ["car", "cat", "dog", "person"]
 skip_frames = 3
@@ -16,7 +23,13 @@ def score_to_bgr(score: float) -> tuple[int, int, int]:
 
 def run_webcam(model, img_size):
     frames = skip_frames
-    
+
+    # Get RTMP stream URL from environment variable
+    rtmp_url = os.getenv('RTMP_STREAM_URL')
+    if not rtmp_url:
+        print("❌ RTMP_STREAM_URL not found in config.env")
+        return
+
     # Initialize MQTT connection
     print("🔌 Initializing MQTT connection...")
     if initialize_mqtt():
@@ -24,11 +37,12 @@ def run_webcam(model, img_size):
     else:
         print("⚠️  MQTT connection failed, continuing without MQTT")
 
-    cap = cv2.VideoCapture("rtmps://live.cloudflare.com:443/live/25f7b82374cb80506bafaa1c45e4e70ek7690d120ab117d3b6e1cbcfc3ab3e758")
+    print(f"🎥 Connecting to RTMP stream...")
+    cap = cv2.VideoCapture(rtmp_url)
     if not cap.isOpened():
-        print("Could not open webcam.")
+        print("Could not open RTMP stream.")
         return
-    print("Press 'q' to quit.")
+    print("✅ Connected to stream. Press 'q' to quit.")
     while True:
         ret, frame = cap.read()
         if not ret:
