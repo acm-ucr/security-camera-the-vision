@@ -1,0 +1,44 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Virtual environments
+venv/
+env/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.ropeproject/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Git
+.git/
+.gitignore
+
+# Testing files
+testing/
+
+# Config files (should be mounted as volume)
+# config.env
+
+# Documentation
+README.md
+*.md
+
+# Model files (if not needed in image)
+# *.pt
+
+# Docker
+.dockerignore
+Dockerfile
+docker-compose.yml

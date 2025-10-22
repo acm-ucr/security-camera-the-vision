@@ -1,0 +1,16 @@
+# Core dependencies
+opencv-python-headless==4.8.1.78
+ultralytics==8.0.228
+torch==2.1.1
+torchvision==0.16.1
+
+# MQTT client
+paho-mqtt==1.6.1
+
+# Environment variables
+python-dotenv==1.0.0
+
+# Additional dependencies for YOLOv8
+numpy<2.0.0
+pillow>=9.3.0
+PyYAML>=6.0

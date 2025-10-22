@@ -115,7 +115,11 @@ def initialize_mqtt():
 
 def send_detection_message(class_name, confidence, source="rtmp_stream"):
     """Send detection message using global MQTT client"""
-    return mqtt_client.send_detection(class_name, confidence, source)
+    # Normalize inputs to lists for compatibility with send_detection()
+    classes = [class_name] if isinstance(class_name, str) else class_name
+    # Convert confidence to Python float, then wrap in list
+    confidences = [float(confidence)] if not isinstance(confidence, list) else [float(c) for c in confidence]
+    return mqtt_client.send_detection(classes, confidences, source)
 
 def disconnect_mqtt():
     """Disconnect from MQTT broker"""
