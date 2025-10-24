@@ -111,6 +111,9 @@ def run_webcam(model, img_size, headless=False, max_retries=5, retry_delay=5, re
                     logger.info(f"Connecting to RTMP stream: {rtmp_url[:50]}...")
                     cap = cv2.VideoCapture(rtmp_url)
 
+                    # Set buffer size to minimum to reduce latency and avoid stale frames
+                    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+
                     if not cap.isOpened():
                         consecutive_failures += 1
 
