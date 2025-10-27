@@ -1,7 +1,8 @@
 import cv2
 import argparse
 from ultralytics import YOLO
-from mqtt_client import initialize_mqtt, send_detection_message, is_mqtt_connected
+from mqtt_client import initialize_mqtt, send_detection_message, send_batch_detection, is_mqtt_connected
+from apns_manager import initialize_apns_manager, send_detection_notification, send_system_status_notification, get_apns_manager
 import os
 import sys
 import time
@@ -32,7 +33,6 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 conversion = ["car", "cat", "dog", "person"]
-skip_frames = 3
 
 # Global flag for graceful shutdown
 shutdown_flag = False
@@ -69,7 +69,7 @@ def score_to_bgr(score: float) -> tuple[int, int, int]:
     return (b, g, r)
 
 
-def run_webcam(model, img_size, headless=False, max_retries=5, retry_delay=5, read_timeout=30):
+def run_webcam(model, img_size, headless=False, max_retries=5, retry_delay=5, read_timeout=30, detection_interval=60):
     """
     Run object detection on RTMP stream with automatic reconnection
 
@@ -80,9 +80,10 @@ def run_webcam(model, img_size, headless=False, max_retries=5, retry_delay=5, re
         max_retries: Maximum connection retry attempts before long wait
         retry_delay: Seconds to wait between retry attempts
         read_timeout: Seconds to wait for frame before considering stream dead
+        detection_interval: Run detection every N frames (default: 60)
     """
     global shutdown_flag
-    frames = skip_frames
+    frames = detection_interval
 
     # Get RTMP stream URL from environment variable
     rtmp_url = os.getenv('RTMP_STREAM_URL')
@@ -97,11 +98,17 @@ def run_webcam(model, img_size, headless=False, max_retries=5, retry_delay=5, re
     else:
         logger.warning("MQTT connection failed, continuing without MQTT")
 
+    # Initialize APNs manager for push notifications
+    logger.info("Initializing APNs manager for push notifications...")
+    apns_manager = initialize_apns_manager()
+    logger.info(f"APNs manager initialized. Registered devices: {apns_manager.get_registered_devices_count()}")
+
     consecutive_failures = 0
     cap = None
     last_frame_time = None
     connection_start_time = None
     frames_processed = 0
+    camera_status = None  # Track camera status: None, 'online', 'offline'
 
     try:
         while not shutdown_flag:
@@ -119,6 +126,16 @@ def run_webcam(model, img_size, headless=False, max_retries=5, retry_delay=5, re
 
                         if consecutive_failures >= max_retries:
                             logger.error(f"Failed to connect after {max_retries} attempts. Waiting 60s before retry...")
+
+                            # Send offline notification if status changed
+                            if camera_status != 'offline':
+                                send_system_status_notification(
+                                    'offline',
+                                    f'Camera failed to connect after {max_retries} attempts',
+                                    'rtmp_stream'
+                                )
+                                camera_status = 'offline'
+
                             time.sleep(60)
                             consecutive_failures = 0
                             continue
@@ -133,12 +150,31 @@ def run_webcam(model, img_size, headless=False, max_retries=5, retry_delay=5, re
                     frames_processed = 0
                     logger.info("✅ Connected to stream successfully")
 
+                    # Send online notification if status changed
+                    if camera_status != 'online':
+                        send_system_status_notification(
+                            'online',
+                            'Camera connected and streaming',
+                            'rtmp_stream'
+                        )
+                        camera_status = 'online'
+
                 # Read frame with timeout detection
                 ret, frame = cap.read()
                 current_time = time.time()
 
                 if not ret:
                     logger.warning("Stream interrupted or ended. Attempting reconnection...")
+
+                    # Send offline notification if status changed
+                    if camera_status != 'offline':
+                        send_system_status_notification(
+                            'offline',
+                            'Stream interrupted or connection lost',
+                            'rtmp_stream'
+                        )
+                        camera_status = 'offline'
+
                     cap.release()
                     cap = None
                     time.sleep(retry_delay)
@@ -153,12 +189,12 @@ def run_webcam(model, img_size, headless=False, max_retries=5, retry_delay=5, re
                     uptime = datetime.now() - connection_start_time
                     logger.info(f"Stream uptime: {uptime}, Frames processed: {frames_processed}")
 
-                # Frame skipping logic
+                # Frame skipping logic - run detection every N frames
                 if frames > 0:
                     frames -= 1
                     continue
                 else:
-                    frames = skip_frames
+                    frames = detection_interval
 
                 # Run inference
                 results = model(frame, imgsz=img_size)
@@ -173,6 +209,9 @@ def run_webcam(model, img_size, headless=False, max_retries=5, retry_delay=5, re
                     if len(boxes) > 0:
                         logger.debug(f"Raw detections: {len(boxes)} objects found")
 
+                    # Collect all high-confidence detections for batch MQTT sending
+                    detected_objects = []
+
                     for (x1, y1, x2, y2), score, label in zip(boxes, scores, labels):
                         # Convert class ID to name using conversion array
                         class_name = conversion[label] if 0 <= label < len(conversion) else f"class_{label}"
@@ -184,13 +223,14 @@ def run_webcam(model, img_size, headless=False, max_retries=5, retry_delay=5, re
                         if score < 0.6:
                             continue
 
+                        # Add to batch for MQTT
+                        detected_objects.append({
+                            'class': class_name,
+                            'confidence': float(score)
+                        })
+
                         color = score_to_bgr(score)
                         text = f"{class_name}: {score:.2f}"
-
-                        # Send MQTT message for detected object
-                        if is_mqtt_connected():
-                            send_detection_message(class_name, score, "rtmp_stream")
-                            logger.info(f"Sent MQTT detection: {class_name} ({score:.2f})")
 
                         # Draw bounding box
                         cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), color, 2)
@@ -204,6 +244,16 @@ def run_webcam(model, img_size, headless=False, max_retries=5, retry_delay=5, re
                         ty2 = ty1 + th + 6
                         cv2.rectangle(frame, (tx1, ty1), (tx2, ty2), color, -1)
                         cv2.putText(frame, text, (tx1 + 3, ty2 - 4), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1)
+
+                    # Send all detections in a single MQTT message
+                    if detected_objects and is_mqtt_connected():
+                        send_batch_detection(detected_objects, "rtmp_stream")
+                        logger.info(f"Sent MQTT batch: {len(detected_objects)} objects - {[obj['class'] for obj in detected_objects]}")
+
+                    # Send push notifications to all registered iOS devices
+                    if detected_objects:
+                        send_detection_notification(detected_objects, "rtmp_stream")
+                        logger.info(f"Triggered APNs notification for {len(detected_objects)} detections")
 
                 # Display frame only if not in headless mode
                 if not headless:
@@ -229,6 +279,12 @@ def run_webcam(model, img_size, headless=False, max_retries=5, retry_delay=5, re
             cap.release()
         if not headless:
             cv2.destroyAllWindows()
+
+        # Shutdown APNs manager
+        apns_manager = get_apns_manager()
+        if apns_manager:
+            apns_manager.shutdown()
+
         logger.info("Shutdown complete")
 
 if __name__ == '__main__':
@@ -245,6 +301,7 @@ if __name__ == '__main__':
     parser.add_argument('--headless', action='store_true', help='Run without display window (for Docker/server)')
     parser.add_argument('--max-retries', type=int, default=5, help='Max connection retry attempts before long wait')
     parser.add_argument('--retry-delay', type=int, default=5, help='Seconds to wait between retries')
+    parser.add_argument('--detection-interval', type=int, default=60, help='Run detection every N frames (default: 60)')
     args = parser.parse_args()
 
     logger.info("="*60)
@@ -276,7 +333,8 @@ if __name__ == '__main__':
             tuple(args.img_size),
             headless=args.headless,
             max_retries=args.max_retries,
-            retry_delay=args.retry_delay
+            retry_delay=args.retry_delay,
+            detection_interval=args.detection_interval
         )
 
     except Exception as e:

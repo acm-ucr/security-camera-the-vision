@@ -29,6 +29,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy application code
 COPY server.py .
 COPY mqtt_client.py .
+COPY apns_manager.py .
 
 # Set environment variables
 ENV PYTHONUNBUFFERED=1
@@ -38,5 +39,5 @@ ENV CONFIG_PATH=/app/config.env
 # Create directories for mounted volumes and logs
 RUN mkdir -p /app/models /app/logs
 
-# Run the application in headless mode (no display window)
-CMD ["python", "server.py", "--headless"]
+# Run the application in headless mode with detection every 60 frames
+CMD ["python", "server.py", "--headless", "--detection-interval", "60"]

@@ -121,6 +121,44 @@ def send_detection_message(class_name, confidence, source="rtmp_stream"):
     confidences = [float(confidence)] if not isinstance(confidence, list) else [float(c) for c in confidence]
     return mqtt_client.send_detection(classes, confidences, source)
 
+def send_batch_detection(objects, source="rtmp_stream"):
+    """
+    Send batch of detected objects in a single MQTT message
+
+    Args:
+        objects: List of dicts with 'class' and 'confidence' keys
+                 e.g., [{'class': 'cat', 'confidence': 0.85}, {'class': 'dog', 'confidence': 0.92}]
+        source: Source identifier (default: "rtmp_stream")
+
+    Returns:
+        bool: True if successful, False otherwise
+    """
+    if not mqtt_client.connected or mqtt_client.client is None:
+        print("❌ MQTT client not connected. Cannot send message.")
+        return False
+
+    # Create detection message with all objects
+    message = {
+        "objects": objects,
+        "timestamp": datetime.now().isoformat(),
+        "source": source
+    }
+
+    try:
+        # Publish message
+        result = mqtt_client.client.publish(MQTT_TOPIC, json.dumps(message))
+
+        if result.rc == mqtt.MQTT_ERR_SUCCESS:
+            print(f"📤 Sent batch detection: {objects}")
+            return True
+        else:
+            print(f"❌ Failed to publish batch message. Return code: {result.rc}")
+            return False
+
+    except Exception as e:
+        print(f"❌ Error sending MQTT batch message: {e}")
+        return False
+
 def disconnect_mqtt():
     """Disconnect from MQTT broker"""
     mqtt_client.disconnect()

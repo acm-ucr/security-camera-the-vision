@@ -7,6 +7,11 @@ torchvision==0.16.1
 # MQTT client
 paho-mqtt==1.6.1
 
+# APNs push notifications
+httpx[http2]>=0.27.0
+pyjwt>=2.8.0
+cryptography>=41.0.0
+
 # Environment variables
 python-dotenv==1.0.0
 

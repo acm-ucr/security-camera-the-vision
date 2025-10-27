@@ -14,6 +14,8 @@ services:
       - ${CONFIG_PATH:-./config.env}:/app/config.env:ro
       # Model file (required)
       - ${MODEL_PATH:-./50epoch.pt}:/app/models/model.pt:ro
+      # APNs key file (required for push notifications)
+      - ${APNS_KEY_PATH:-./apns_key.p8}:/app/apns_key.p8:ro
       # Logs directory (for persistent logging and debugging)
       - ./logs:/app/logs
 
