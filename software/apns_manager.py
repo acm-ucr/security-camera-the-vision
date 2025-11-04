@@ -13,7 +13,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 from datetime import datetime
 from threading import Lock
-from simple_apns import SimpleAPNsClient, SimplePayload
+from simple_apns import APNSClient, Payload
 
 # Load environment variables
 config_path = Path(__file__).parent / "config.env"
@@ -88,10 +88,11 @@ class APNsManager:
             use_sandbox = self.apns_environment.lower() == "development"
 
             # Initialize APNs client with simple_apns
-            self.apns_client = SimpleAPNsClient(
-                auth_key_path=str(key_path),
-                auth_key_id=self.apns_key_id,
+            self.apns_client = APNSClient(
                 team_id=self.apns_team_id,
+                auth_key_id=self.apns_key_id,
+                auth_key_path=str(key_path),
+                bundle_id=self.apns_bundle_id,
                 use_sandbox=use_sandbox,
             )
 
@@ -256,12 +257,13 @@ class APNsManager:
         }
 
         # Create APNs payload
-        payload = SimplePayload(
-            alert={"title": title, "body": body},
-            sound="default",
-            badge=1,
-            custom=custom_data,
-        )
+        payload = Payload()
+        payload.set_alert(title=title, body=body)
+        payload.set_sound("default")
+        payload.set_badge(1)
+        # Add custom data fields
+        for key, value in custom_data.items():
+            payload.add_custom_data(key, value)
 
         # Send to all devices
         success_count = 0
@@ -271,8 +273,7 @@ class APNsManager:
             try:
                 self.apns_client.send_notification(
                     device_token=device_token,
-                    payload_dict=payload.to_dict(),
-                    bundle_id=self.apns_bundle_id,
+                    payload=payload,
                 )
                 success_count += 1
                 logger.debug(f"✅ Push sent to {device_token[:20]}...")
@@ -329,12 +330,13 @@ class APNsManager:
         }
 
         # Create APNs payload
-        payload = SimplePayload(
-            alert={"title": title, "body": body},
-            sound="default",
-            badge=1,
-            custom=custom_data,
-        )
+        payload = Payload()
+        payload.set_alert(title=title, body=body)
+        payload.set_sound("default")
+        payload.set_badge(1)
+        # Add custom data fields
+        for key, value in custom_data.items():
+            payload.add_custom_data(key, value)
 
         # Send to all devices
         success_count = 0
@@ -344,8 +346,7 @@ class APNsManager:
             try:
                 self.apns_client.send_notification(
                     device_token=device_token,
-                    payload_dict=payload.to_dict(),
-                    bundle_id=self.apns_bundle_id,
+                    payload=payload,
                 )
                 success_count += 1
                 logger.debug(f"✅ System notification sent to {device_token[:20]}...")
