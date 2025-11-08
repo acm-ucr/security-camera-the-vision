@@ -8,6 +8,8 @@ import sys
 import time
 import signal
 import logging
+import subprocess
+import numpy as np
 from pathlib import Path
 from dotenv import load_dotenv
 from datetime import datetime
@@ -69,6 +71,77 @@ def score_to_bgr(score: float) -> tuple[int, int, int]:
     return (b, g, r)
 
 
+def create_ffmpeg_process(rtmps_url, width, height, fps=30):
+    """
+    Create an FFmpeg process to stream video to Cloudflare RTMPS
+    
+    Args:
+        rtmps_url: Full RTMPS URL including stream key
+        width: Video width in pixels
+        height: Video height in pixels
+        fps: Frames per second (default: 30)
+    
+    Returns:
+        subprocess.Popen object or None if failed
+    """
+    try:
+        # FFmpeg command to encode raw video from stdin and stream to RTMPS
+        ffmpeg_cmd = [
+            'ffmpeg',
+            '-f', 'rawvideo',
+            '-vcodec', 'rawvideo',
+            '-s', f'{width}x{height}',
+            '-pix_fmt', 'bgr24',  # OpenCV uses BGR format
+            '-r', str(fps),
+            '-i', '-',  # Read from stdin
+            '-c:v', 'libx264',
+            '-preset', 'ultrafast',  # Low latency
+            '-tune', 'zerolatency',
+            '-pix_fmt', 'yuv420p',
+            '-f', 'flv',
+            '-flvflags', 'no_duration_filesize',
+            rtmps_url
+        ]
+        
+        process = subprocess.Popen(
+            ffmpeg_cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            bufsize=0
+        )
+        
+        logger.info(f"FFmpeg process started for RTMPS streaming: {rtmps_url[:50]}...")
+        return process
+    except Exception as e:
+        logger.error(f"Failed to start FFmpeg process: {e}")
+        return None
+
+
+def write_frame_to_ffmpeg(process, frame):
+    """
+    Write a frame to FFmpeg process stdin
+    
+    Args:
+        process: FFmpeg subprocess
+        frame: OpenCV frame (numpy array)
+    
+    Returns:
+        True if successful, False otherwise
+    """
+    if process is None or process.stdin is None:
+        return False
+    
+    try:
+        # Write frame data to FFmpeg stdin
+        process.stdin.write(frame.tobytes())
+        process.stdin.flush()
+        return True
+    except Exception as e:
+        logger.warning(f"Failed to write frame to FFmpeg: {e}")
+        return False
+
+
 def run_webcam(model, img_size, headless=False, max_retries=5, retry_delay=5, read_timeout=30, detection_interval=60):
     """
     Run object detection on RTMP stream with automatic reconnection
@@ -90,6 +163,11 @@ def run_webcam(model, img_size, headless=False, max_retries=5, retry_delay=5, re
     if not rtmp_url:
         logger.error("RTMP_STREAM_URL not found in config.env")
         return
+    
+    # Get Cloudflare RTMPS output URL from environment variable or use provided one
+    cloudflare_rtmps_url = os.getenv('CLOUDFLARE_RTMPS_URL', 
+                                     'rtmps://live.cloudflare.com:443/live/bab8136eedaef02767c89e9dedbf3b48kb6a07db567bc485d2f4156bb122899cb')
+    logger.info(f"Cloudflare RTMPS output URL configured: {cloudflare_rtmps_url[:50]}...")
 
     # Initialize MQTT connection
     logger.info("Initializing MQTT connection...")
@@ -109,6 +187,16 @@ def run_webcam(model, img_size, headless=False, max_retries=5, retry_delay=5, re
     connection_start_time = None
     frames_processed = 0
     camera_status = None  # Track camera status: None, 'online', 'offline'
+    
+    # FFmpeg output stream variables
+    ffmpeg_process = None
+    stream_width = None
+    stream_height = None
+    stream_fps = 30
+    output_stream_failures = 0
+    
+    # Cache for last annotations to redraw on skipped frames
+    last_annotations = []  # List of (boxes, scores, labels, colors, texts)
 
     try:
         while not shutdown_flag:
@@ -149,6 +237,23 @@ def run_webcam(model, img_size, headless=False, max_retries=5, retry_delay=5, re
                     connection_start_time = datetime.now()
                     frames_processed = 0
                     logger.info("✅ Connected to stream successfully")
+                    
+                    # Get stream dimensions for FFmpeg
+                    stream_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                    stream_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                    stream_fps = int(cap.get(cv2.CAP_PROP_FPS)) or 30
+                    logger.info(f"Stream dimensions: {stream_width}x{stream_height} @ {stream_fps} fps")
+                    
+                    # Start FFmpeg process for RTMPS output
+                    if ffmpeg_process is None:
+                        ffmpeg_process = create_ffmpeg_process(
+                            cloudflare_rtmps_url,
+                            stream_width,
+                            stream_height,
+                            stream_fps
+                        )
+                        if ffmpeg_process is None:
+                            logger.warning("Failed to start FFmpeg output stream, continuing without streaming")
 
                     # Send online notification if status changed
                     if camera_status != 'online':
@@ -190,70 +295,133 @@ def run_webcam(model, img_size, headless=False, max_retries=5, retry_delay=5, re
                     logger.info(f"Stream uptime: {uptime}, Frames processed: {frames_processed}")
 
                 # Frame skipping logic - run detection every N frames
+                # Always send frames to output stream, but only run detection periodically
+                run_detection = (frames == 0)
                 if frames > 0:
                     frames -= 1
-                    continue
                 else:
                     frames = detection_interval
 
-                # Run inference
-                results = model(frame, imgsz=img_size)
+                # Run inference only when needed
+                if run_detection:
+                    results = model(frame, imgsz=img_size)
+                else:
+                    results = []
 
-                # Process detections
-                for r in results:
-                    boxes = r.boxes.xyxy.cpu().numpy()
-                    scores = r.boxes.conf.cpu().numpy()
-                    labels = r.boxes.cls.cpu().numpy().astype(int)
+                # Process detections (only if we ran detection)
+                if run_detection:
+                    # Clear previous annotations
+                    last_annotations = []
+                    
+                    for r in results:
+                        boxes = r.boxes.xyxy.cpu().numpy()
+                        scores = r.boxes.conf.cpu().numpy()
+                        labels = r.boxes.cls.cpu().numpy().astype(int)
 
-                    # Log all detections (even below threshold) for debugging
-                    if len(boxes) > 0:
-                        logger.debug(f"Raw detections: {len(boxes)} objects found")
+                        # Log all detections (even below threshold) for debugging
+                        if len(boxes) > 0:
+                            logger.debug(f"Raw detections: {len(boxes)} objects found")
 
-                    # Collect all high-confidence detections for batch MQTT sending
-                    detected_objects = []
+                        # Collect all high-confidence detections for batch MQTT sending
+                        detected_objects = []
 
-                    for (x1, y1, x2, y2), score, label in zip(boxes, scores, labels):
-                        # Convert class ID to name using conversion array
-                        class_name = conversion[label] if 0 <= label < len(conversion) else f"class_{label}"
+                        for (x1, y1, x2, y2), score, label in zip(boxes, scores, labels):
+                            # Convert class ID to name using conversion array
+                            class_name = conversion[label] if 0 <= label < len(conversion) else f"class_{label}"
 
-                        # Log detection even if below threshold
-                        if score >= 0.3:  # Lower threshold for logging only
-                            logger.info(f"Detected {class_name} with confidence {score:.2f}")
+                            # Log detection even if below threshold
+                            if score >= 0.3:  # Lower threshold for logging only
+                                logger.info(f"Detected {class_name} with confidence {score:.2f}")
 
-                        if score < 0.6:
-                            continue
+                            if score < 0.6:
+                                continue
 
-                        # Add to batch for MQTT
-                        detected_objects.append({
-                            'class': class_name,
-                            'confidence': float(score)
-                        })
+                            # Add to batch for MQTT
+                            detected_objects.append({
+                                'class': class_name,
+                                'confidence': float(score)
+                            })
 
-                        color = score_to_bgr(score)
-                        text = f"{class_name}: {score:.2f}"
+                            color = score_to_bgr(score)
+                            text = f"{class_name}: {score:.2f}"
 
+                            # Cache annotation for redrawing on skipped frames
+                            last_annotations.append({
+                                'box': (int(x1), int(y1), int(x2), int(y2)),
+                                'color': color,
+                                'text': text
+                            })
+
+                            # Draw bounding box
+                            cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), color, 2)
+
+                            # Draw text background for readability
+                            (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
+                            tx1 = int(x1)
+                            ty1 = int(y1) - th - 6
+                            ty1 = max(0, ty1)
+                            tx2 = tx1 + tw + 6
+                            ty2 = ty1 + th + 6
+                            cv2.rectangle(frame, (tx1, ty1), (tx2, ty2), color, -1)
+                            cv2.putText(frame, text, (tx1 + 3, ty2 - 4), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1)
+
+                        # Send all detections in a single MQTT message
+                        if detected_objects and is_mqtt_connected():
+                            send_batch_detection(detected_objects, "rtmp_stream")
+                            logger.info(f"Sent MQTT batch: {len(detected_objects)} objects - {[obj['class'] for obj in detected_objects]}")
+
+                        # Send push notifications to all registered iOS devices
+                        if detected_objects:
+                            send_detection_notification(detected_objects, "rtmp_stream")
+                            logger.info(f"Triggered APNs notification for {len(detected_objects)} detections")
+                else:
+                    # Redraw cached annotations on frames where we skip detection
+                    for ann in last_annotations:
+                        x1, y1, x2, y2 = ann['box']
+                        color = ann['color']
+                        text = ann['text']
+                        
                         # Draw bounding box
-                        cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), color, 2)
-
+                        cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+                        
                         # Draw text background for readability
                         (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
-                        tx1 = int(x1)
-                        ty1 = int(y1) - th - 6
+                        tx1 = x1
+                        ty1 = y1 - th - 6
                         ty1 = max(0, ty1)
                         tx2 = tx1 + tw + 6
                         ty2 = ty1 + th + 6
                         cv2.rectangle(frame, (tx1, ty1), (tx2, ty2), color, -1)
                         cv2.putText(frame, text, (tx1 + 3, ty2 - 4), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1)
 
-                    # Send all detections in a single MQTT message
-                    if detected_objects and is_mqtt_connected():
-                        send_batch_detection(detected_objects, "rtmp_stream")
-                        logger.info(f"Sent MQTT batch: {len(detected_objects)} objects - {[obj['class'] for obj in detected_objects]}")
-
-                    # Send push notifications to all registered iOS devices
-                    if detected_objects:
-                        send_detection_notification(detected_objects, "rtmp_stream")
-                        logger.info(f"Triggered APNs notification for {len(detected_objects)} detections")
+                # Stream annotated frame to Cloudflare RTMPS (always send, even if no detection)
+                if ffmpeg_process is not None:
+                    success = write_frame_to_ffmpeg(ffmpeg_process, frame)
+                    if not success:
+                        output_stream_failures += 1
+                        if output_stream_failures >= 10:
+                            logger.warning("FFmpeg output stream failed multiple times, attempting to restart...")
+                            try:
+                                if ffmpeg_process.stdin:
+                                    ffmpeg_process.stdin.close()
+                                ffmpeg_process.terminate()
+                                ffmpeg_process.wait(timeout=5)
+                            except:
+                                pass
+                            ffmpeg_process = None
+                            output_stream_failures = 0
+                    else:
+                        output_stream_failures = 0
+                else:
+                    # Try to restart FFmpeg if we have stream dimensions
+                    if stream_width and stream_height and frames_processed % 300 == 0:
+                        logger.info("Attempting to restart FFmpeg output stream...")
+                        ffmpeg_process = create_ffmpeg_process(
+                            cloudflare_rtmps_url,
+                            stream_width,
+                            stream_height,
+                            stream_fps
+                        )
 
                 # Display frame only if not in headless mode
                 if not headless:
@@ -277,6 +445,22 @@ def run_webcam(model, img_size, headless=False, max_retries=5, retry_delay=5, re
         logger.info("Cleaning up resources...")
         if cap:
             cap.release()
+        
+        # Cleanup FFmpeg process
+        if ffmpeg_process is not None:
+            logger.info("Closing FFmpeg output stream...")
+            try:
+                if ffmpeg_process.stdin:
+                    ffmpeg_process.stdin.close()
+                ffmpeg_process.terminate()
+                ffmpeg_process.wait(timeout=5)
+            except Exception as e:
+                logger.warning(f"Error closing FFmpeg process: {e}")
+                try:
+                    ffmpeg_process.kill()
+                except:
+                    pass
+        
         if not headless:
             cv2.destroyAllWindows()
 
@@ -301,7 +485,7 @@ if __name__ == '__main__':
     parser.add_argument('--headless', action='store_true', help='Run without display window (for Docker/server)')
     parser.add_argument('--max-retries', type=int, default=5, help='Max connection retry attempts before long wait')
     parser.add_argument('--retry-delay', type=int, default=5, help='Seconds to wait between retries')
-    parser.add_argument('--detection-interval', type=int, default=60, help='Run detection every N frames (default: 60)')
+    parser.add_argument('--detection-interval', type=int, default=30, help='Run detection every N frames (default: 60)')
     args = parser.parse_args()
 
     logger.info("="*60)
