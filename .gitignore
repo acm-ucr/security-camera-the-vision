@@ -1,0 +1,22 @@
+software/cricket.pt
+software/config.env
+
+# APNs密钥文件（敏感信息）
+software/apns_key.p8
+software/*.p8
+*.p8
+
+# APNS证书文件（如果使用certificate-based认证）
+software/*.p12
+software/*.pem
+*.p12
+*.pem
+
+# 日志文件
+software/logs/
+software/*.log
+
+# Python缓存
+software/__pycache__/
+software/*.pyc
+software/*.pyo
